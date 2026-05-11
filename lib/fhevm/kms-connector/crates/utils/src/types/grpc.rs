@@ -1,0 +1,78 @@
+use crate::types::request_id_to_u256;
+use alloy::primitives::U256;
+use anyhow::anyhow;
+use kms_grpc::kms::v1::{
+    CrsGenRequest, CrsGenResult, KeyGenPreprocRequest, KeyGenPreprocResult, KeyGenRequest,
+    KeyGenResult, PublicDecryptionRequest, PublicDecryptionResponse, RequestId,
+    UserDecryptionRequest, UserDecryptionResponse,
+};
+use tonic::Response;
+
+/// The different GRPC requests used by the KMS Connector for communication the with KMS Core.
+#[derive(Clone, Debug)]
+pub enum KmsGrpcRequest {
+    PublicDecryption(PublicDecryptionRequest),
+    UserDecryption(UserDecryptionRequest),
+    PrepKeygen(KeyGenPreprocRequest),
+    Keygen(KeyGenRequest),
+    Crsgen(CrsGenRequest),
+}
+
+impl From<PublicDecryptionRequest> for KmsGrpcRequest {
+    fn from(value: PublicDecryptionRequest) -> Self {
+        Self::PublicDecryption(value)
+    }
+}
+
+impl From<UserDecryptionRequest> for KmsGrpcRequest {
+    fn from(value: UserDecryptionRequest) -> Self {
+        Self::UserDecryption(value)
+    }
+}
+
+/// The different KMS Core GRPC responses used by the KMS Connector.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KmsGrpcResponse {
+    PublicDecryption {
+        decryption_id: U256,
+        grpc_response: PublicDecryptionResponse,
+    },
+    UserDecryption {
+        decryption_id: U256,
+        grpc_response: UserDecryptionResponse,
+    },
+    PrepKeygen(KeyGenPreprocResult),
+    Keygen(KeyGenResult),
+    Crsgen(CrsGenResult),
+    NoResponseExpected,
+}
+
+impl TryFrom<(RequestId, Response<PublicDecryptionResponse>)> for KmsGrpcResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        value: (RequestId, Response<PublicDecryptionResponse>),
+    ) -> Result<Self, Self::Error> {
+        let decryption_id = request_id_to_u256(value.0)
+            .map_err(|e| anyhow!("Failed to parse decryption_id: {e}"))?;
+
+        Ok(Self::PublicDecryption {
+            decryption_id,
+            grpc_response: value.1.into_inner(),
+        })
+    }
+}
+
+impl TryFrom<(RequestId, Response<UserDecryptionResponse>)> for KmsGrpcResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(value: (RequestId, Response<UserDecryptionResponse>)) -> Result<Self, Self::Error> {
+        let decryption_id = request_id_to_u256(value.0)
+            .map_err(|e| anyhow!("Failed to parse decryption_id: {e}"))?;
+
+        Ok(Self::UserDecryption {
+            decryption_id,
+            grpc_response: value.1.into_inner(),
+        })
+    }
+}

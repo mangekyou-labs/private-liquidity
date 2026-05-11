@@ -1,0 +1,32 @@
+{
+  "dependencies/forge-fhevm": {
+    "rev": "eba2324"
+  },
+  "lib/fhenix-contracts": {
+    "tag": {
+      "name": "v0.3.1",
+      "rev": "00e1eb38e6adb1c28e97cd40d9095668930aee99"
+    }
+  },
+  "lib/fhevm": {
+    "tag": {
+      "name": "v0.12.4",
+      "rev": "c83929ea8128a100c0801031165a706960e9e606"
+    }
+  },
+  "lib/forge-std": {
+    "tag": {
+      "name": "v1.12.0",
+      "rev": "7117c90c8cf6c68e5acce4f09a6b24715cea4de6"
+    }
+  },
+  "lib/v4-core": {
+    "tag": {
+      "name": "v4.0.0",
+      "rev": "e50237c43811bd9b526eff40f26772152a42daba"
+    }
+  },
+  "lib/v4-periphery": {
+    "rev": "3779387e5d296f39df543d23524b050f89a62917"
+  }
+}

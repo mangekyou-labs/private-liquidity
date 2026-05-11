@@ -1,0 +1,82 @@
+[package]
+name = "tfhe-worker"
+version = "0.7.0"
+default-run = "tfhe_worker"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# workspace dependencies
+alloy = { workspace = true }
+bigdecimal = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+prometheus = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+sqlx = { workspace = true }
+tfhe = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+# opentelemetry support
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+chrono = { workspace = true }
+
+# crates.io dependencies
+itertools = "0.13.0"
+lazy_static = "1.5.0"
+uuid = { version = "1", features = ["v4"] }
+
+# local dependencies
+fhevm-engine-common = { path = "../fhevm-engine-common" }
+scheduler = { path = "../scheduler" }
+
+[features]
+nightly-avx512 = ["tfhe/nightly-avx512"]
+gpu = ["tfhe/gpu", "scheduler/gpu", "fhevm-engine-common/gpu", "test-harness/gpu"]
+bench = []
+latency = ["fhevm-engine-common/latency"]
+throughput = ["fhevm-engine-common/throughput"]
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["async_futures"] }
+host-listener = { path = "../host-listener" }
+testcontainers = { workspace = true }
+test-harness = { path = "../test-harness" }
+serde = { workspace = true }
+serial_test = { workspace = true }
+
+[[bin]]
+name = "tfhe_worker"
+path = "src/bin/tfhe_worker.rs"
+
+[[bin]]
+name = "utils"
+path = "src/bin/utils.rs"
+
+[[bench]]
+name = "erc20"
+path = "benches/erc20.rs"
+harness = false
+
+[[bench]]
+name = "synthetics"
+path = "benches/synthetics.rs"
+harness = false
+
+[[bench]]
+name = "dex"
+path = "benches/dex.rs"
+harness = false
+
+[lints]
+workspace = true

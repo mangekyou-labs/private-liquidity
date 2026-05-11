@@ -1,0 +1,159 @@
+{{- if .Values.tfheWorker.enabled -}}
+{{- $disabled := default (list) .Values.tfheWorker.disabledArgs -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: coprocessor-tfhe-worker
+    app.kubernetes.io/name: {{ include "tfheWorkerName" . }}
+  name: {{ include "tfheWorkerName" . }}
+spec:
+  replicas: {{ .Values.tfheWorker.replicas }}
+  selector:
+    matchLabels:
+      app: coprocessor-tfhe-worker
+  {{- if .Values.tfheWorker.updateStrategy }}
+  strategy:
+    {{- toYaml .Values.tfheWorker.updateStrategy | nindent 4 }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        app: coprocessor-tfhe-worker
+        app.kubernetes.io/name: {{ include "tfheWorkerName" . }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.tfheWorker.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      imagePullSecrets:
+        - name: registry-credentials
+      restartPolicy: Always
+      {{- with .Values.tfheWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tfheWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tfheWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.tfheWorker.serviceAccountName }}
+      serviceAccountName: {{ .Values.tfheWorker.serviceAccountName }}
+      {{- end }}
+      containers:
+        - name: coprocessor-tfhe-worker
+          image: {{ .Values.tfheWorker.image.name }}:{{ .Values.tfheWorker.image.tag }}
+          command: ["tfhe_worker"]
+          args:
+            {{- if not (has "database-url" $disabled) }}
+            - --database-url=$(DATABASE_URL)
+            {{- end }}
+            {{- if not (has "metrics-addr" $disabled) }}
+            - --metrics-addr=0.0.0.0:{{ .Values.tfheWorker.ports.metrics }}
+            {{- end }}
+            {{- if not (has "health-check-port" $disabled) }}
+            - --health-check-port={{ .Values.tfheWorker.ports.healthcheck }}
+            {{- end }}
+            {{- with .Values.tfheWorker.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- with .Values.commonConfig.databaseUser }}
+            - name: DATABASE_USER
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+            {{- with .Values.commonConfig.databaseEndpoint }}
+            - name: DATABASE_ENDPOINT
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+            {{- if eq (include "coprocessorDatabaseAuthMode" .) "password" }}
+            {{- with .Values.commonConfig.databasePassword }}
+            - name: DATABASE_PASSWORD
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.commonConfig.databaseUrl }}
+            - name: DATABASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq (include "coprocessorDatabaseAuthMode" .) "iam" }}
+            - name: DATABASE_IAM_AUTH_ENABLED
+              value: "true"
+            {{- with .Values.commonConfig.databaseIamRegion }}
+            - name: DATABASE_IAM_REGION
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+            {{- with .Values.commonConfig.databaseSslRootCertPath }}
+            - name: DATABASE_SSL_ROOT_CERT_PATH
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+          {{- if default .Values.commonConfig.tracing.enabled .Values.tfheWorker.tracing.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.commonConfig.tracing.endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.tfheWorker.tracing.service | quote }}
+          {{- end }}
+          {{- with .Values.commonConfig.env }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tfheWorker.env }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            {{- range $portName, $portValue := .Values.tfheWorker.ports }}
+            - name: {{ $portName }}
+              containerPort: {{ $portValue }}
+              protocol: TCP
+            {{- end }}
+          resources:
+            requests:
+              cpu: {{ .Values.tfheWorker.resources.requests.cpu | default "100m" }}
+              memory: {{ .Values.tfheWorker.resources.requests.memory | default "256Mi" }}
+            limits:
+              cpu: {{ .Values.tfheWorker.resources.limits.cpu | default "500m" }}
+              memory: {{ .Values.tfheWorker.resources.limits.memory | default "512Mi" }}
+          {{- if and .Values.tfheWorker.probes .Values.tfheWorker.probes.liveness.enabled }}
+          livenessProbe:
+            {{- toYaml (omit .Values.tfheWorker.probes.liveness "enabled") | nindent 12 }}
+          {{- end }}
+          {{- if and .Values.tfheWorker.probes .Values.tfheWorker.probes.readiness.enabled }}
+          readinessProbe:
+            {{- toYaml (omit .Values.tfheWorker.probes.readiness "enabled") | nindent 12 }}
+          {{- end }}
+{{- end -}}

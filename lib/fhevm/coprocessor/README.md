@@ -1,0 +1,337 @@
+## Introduction
+**FHEVM Coprocessor** provides the execution service for FHE computations.
+
+It includes a **Coprocessor** service [FHEVM-coprocessor](docs/getting_started/fhevm/coprocessor/coprocessor_backend.md). The Coprocessor
+itself consists of multiple microservices, e.g. for FHE compute, input verify, transaction sending, listening to events, etc.
+
+## Main features
+
+- An **Executor** service for [FHEVM-native](docs/getting_started/fhevm/native/executor.md)
+- A **Coprocessor** service for [FHEVM-coprocessor](docs/getting_started/fhevm/coprocessor/coprocessor_backend.md)
+
+_Learn more about FHEVM Coprocessor features in the [documentation](docs)._
+<br></br>
+
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Main Features](#main-features)
+- [Getting Started](#getting-started)
+  - [Generating Keys](#generating-keys)
+  - [Coprocessor](#coprocessor)
+    - [Dependencies](#dependences)
+    - [Installation](#installation)
+    - [Services Configuration](#services-configuration)
+      - [tfhe-worker](#tfhe-worker)
+      - [cli](#cli)
+      - [host-listener](#host-listener)
+      - [gw-listener](#gw-listener)
+      - [sns-worker](#sns-worker)
+      - [zkproof-worker](#zkproof-worker)
+      - [transaction-sender](#transaction-sender)
+- [Resources](#resources)
+  - [Documentation](#documentation)
+  - [FHEVM Demo](#fhevm-demo)
+- [Support](#support)
+
+## Getting started
+
+### Generating keys
+
+For testing purposes a set of keys can be generated as follows:
+
+```
+$ cd fhevm-engine/fhevm-engine-common
+$ cargo run generate-keys
+```
+
+The keys are stored by default in `fhevm-engine/fhevm-keys`.
+
+### Coprocessor
+
+#### Dependences
+
+- `docker-compose`
+- `rust`
+- `sqlx-cli` (install with `cargo install sqlx-cli`)
+- `anvil` (for testing, installation manual https://book.getfoundry.sh/getting-started/installation)
+
+#### Installation
+
+```
+$ cd fhevm-engine/coprocessor
+$ cargo install --path .
+```
+
+#### Services Configuration
+
+##### tfhe-worker
+
+```bash
+$ tfhe_worker --help
+Usage: tfhe_worker [OPTIONS]
+
+Options:
+      --run-bg-worker
+          Run the background worker
+      --generate-fhe-keys
+          Generate fhe keys and exit
+      --work-items-batch-size <WORK_ITEMS_BATCH_SIZE>
+          Work items batch size [default: 10]
+      --tenant-key-cache-size <TENANT_KEY_CACHE_SIZE>
+          Tenant key cache size [default: 32]
+      --coprocessor-fhe-threads <COPROCESSOR_FHE_THREADS>
+          Coprocessor FHE processing threads [default: 8]
+      --tokio-threads <TOKIO_THREADS>
+          Tokio Async IO threads [default: 4]
+      --pg-pool-max-connections <PG_POOL_MAX_CONNECTIONS>
+          Postgres pool max connections [default: 10]
+      --metrics-addr <METRICS_ADDR>
+          Prometheus metrics server address [default: 0.0.0.0:9100]
+      --database-url <DATABASE_URL>
+          Postgres database url. If unspecified DATABASE_URL environment variable is used
+```
+
+```bash
+$ cli --help
+Usage: cli <COMMAND>
+
+Commands:
+  insert-tenant  Inserts tenant into specified database
+  smoke-test     Coprocessor smoke test
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+For more details on configuration, please check [Coprocessor Configuration](docs/getting_started/fhevm/coprocessor/configuration.md)
+
+For AWS RDS/PostgreSQL IAM authentication, keep `DATABASE_URL` passwordless, for example
+`postgresql://coprocessor@my-db.cluster-xyz.eu-west-2.rds.amazonaws.com:5432/coprocessor`,
+and set `DATABASE_IAM_AUTH_ENABLED=true`. `DATABASE_IAM_REGION` and
+`DATABASE_SSL_ROOT_CERT_PATH` should also be set so the runtime can sign tokens for the correct
+region and enforce `verify-full` TLS with the expected CA bundle.
+
+##### host-listener
+
+```bash
+$ host_listener --help
+Usage: host_listener [OPTIONS]
+
+Options:
+      --url <URL>                                      [default: ws://0.0.0.0:8746]
+      --ignore-tfhe-events
+      --ignore-acl-events
+      --acl-contract-address <ACL_CONTRACT_ADDRESS>
+      --tfhe-contract-address <TFHE_CONTRACT_ADDRESS>
+      --database-url <DATABASE_URL>
+      --start-at-block <START_AT_BLOCK>                Can be negative from last block
+      --end-at-block <END_AT_BLOCK>
+  -h, --help                                           Print help
+  -V, --version                                        Print version
+```
+
+##### gw-listener
+
+```bash
+$ gw_listener --help
+Usage: gw_listener [OPTIONS] --gw-url <GW_URL> --input-verification-address <INPUT_VERIFICATION_ADDRESS>
+
+Options:
+      --database-url <DATABASE_URL>
+          
+      --database-pool-size <DATABASE_POOL_SIZE>
+          [default: 16]
+      --verify-proof-req-database-channel <VERIFY_PROOF_REQ_DATABASE_CHANNEL>
+          [default: event_zkpok_new_work]
+      --gw-url <GW_URL>
+          
+  -i, --input-verification-address <INPUT_VERIFICATION_ADDRESS>
+          
+      --error-sleep-initial-secs <ERROR_SLEEP_INITIAL_SECS>
+          [default: 1]
+      --error-sleep-max-secs <ERROR_SLEEP_MAX_SECS>
+          [default: 10]
+      --health-check-port <HEALTH_CHECK_PORT>
+          [default: 8080]
+      --metrics-addr <METRICS_ADDR>
+          Prometheus metrics server address [default: 0.0.0.0:9100]
+      --health-check-timeout <HEALTH_CHECK_TIMEOUT>
+          [default: 4s]
+      --provider-max-retries <PROVIDER_MAX_RETRIES>
+          [default: 4294967295]
+      --provider-retry-interval <PROVIDER_RETRY_INTERVAL>
+          [default: 4s]
+      --log-level <LOG_LEVEL>
+          [default: INFO]
+      --get-logs-poll-interval <GET_LOGS_POLL_INTERVAL>
+          [default: 1s]
+      --get-logs-block-batch-size <GET_LOGS_BLOCK_BATCH_SIZE>
+          [default: 100]
+      --service-name <SERVICE_NAME>
+          gw-listener service name in OTLP traces [default: gw-listener]
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
+
+##### transaction-sender
+
+```bash
+$ transaction_sender --help
+Usage: transaction_sender [OPTIONS] --input-verification-address <INPUT_VERIFICATION_ADDRESS> --ciphertext-commits-address <CIPHERTEXT_COMMITS_ADDRESS> --gateway-url <GATEWAY_URL>
+
+Options:
+  -i, --input-verification-address <INPUT_VERIFICATION_ADDRESS>
+          
+  -c, --ciphertext-commits-address <CIPHERTEXT_COMMITS_ADDRESS>
+          
+  -g, --gateway-url <GATEWAY_URL>
+          
+  -s, --signer-type <SIGNER_TYPE>
+          [default: private-key] [possible values: private-key, aws-kms]
+  -p, --private-key <PRIVATE_KEY>
+          
+  -d, --database-url <DATABASE_URL>
+          
+      --database-pool-size <DATABASE_POOL_SIZE>
+          [default: 10]
+      --database-polling-interval-secs <DATABASE_POLLING_INTERVAL_SECS>
+          [default: 1]
+      --verify-proof-resp-database-channel <VERIFY_PROOF_RESP_DATABASE_CHANNEL>
+          [default: event_zkpok_computed]
+      --add-ciphertexts-database-channel <ADD_CIPHERTEXTS_DATABASE_CHANNEL>
+          [default: event_ciphertexts_uploaded]
+      --verify-proof-resp-batch-limit <VERIFY_PROOF_RESP_BATCH_LIMIT>
+          [default: 128]
+      --verify-proof-resp-max-retries <VERIFY_PROOF_RESP_MAX_RETRIES>
+          [default: 6]
+      --verify-proof-remove-after-max-retries
+          
+      --add-ciphertexts-batch-limit <ADD_CIPHERTEXTS_BATCH_LIMIT>
+          [default: 10]
+      --add-ciphertexts-max-retries <ADD_CIPHERTEXTS_MAX_RETRIES>
+          [default: 2147483647]
+      --error-sleep-initial-secs <ERROR_SLEEP_INITIAL_SECS>
+          [default: 1]
+      --error-sleep-max-secs <ERROR_SLEEP_MAX_SECS>
+          [default: 300]
+      --txn-receipt-timeout-secs <TXN_RECEIPT_TIMEOUT_SECS>
+          [default: 10]
+      --required-txn-confirmations <REQUIRED_TXN_CONFIRMATIONS>
+          [default: 0]
+      --review-after-unlimited-retries <REVIEW_AFTER_UNLIMITED_RETRIES>
+          [default: 30]
+      --provider-max-retries <PROVIDER_MAX_RETRIES>
+          [default: 4294967295]
+      --provider-retry-interval <PROVIDER_RETRY_INTERVAL>
+          [default: 4s]
+      --health-check-port <HEALTH_CHECK_PORT>
+          [default: 8080]
+      --metrics-addr <METRICS_ADDR>
+          Prometheus metrics server address [default: 0.0.0.0:9100]
+      --health-check-timeout <HEALTH_CHECK_TIMEOUT>
+          [default: 4s]
+      --log-level <LOG_LEVEL>
+          [default: INFO]
+      --gas-limit-overprovision-percent <GAS_LIMIT_OVERPROVISION_PERCENT>
+          [default: 120]
+      --graceful-shutdown-timeout <GRACEFUL_SHUTDOWN_TIMEOUT>
+          [default: 8s]
+      --service-name <SERVICE_NAME>
+          service name in OTLP traces [default: txn-sender]
+      --metric-host-txn-latency <METRIC_HOST_TXN_LATENCY>
+          Prometheus metrics: coprocessor_host_txn_latency_seconds [default: 0.1:60.0:0.1]
+      --metric-zkproof-txn-latency <METRIC_ZKPROOF_TXN_LATENCY>
+          Prometheus metrics: coprocessor_zkproof_txn_latency_seconds [default: 0.1:60.0:0.1]
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
+
+When using the `private-key` signer type, the `-p, --private-key <PRIVATE_KEY>` option becomes mandatory.
+
+When using the `aws-kms` signer type, standard `AWS_*` environment variables are supported, e.g.:
+ - **AWS_REGION**
+ - **AWS_ACCESS_KEY_ID** (i.e. username)
+ - **AWS_SECRET_ACCESS_KEY** (i.e. password)
+ - etc.
+
+## Telemetry Style Guide (Tracing + OTEL)
+
+Use `tracing` spans as the default telemetry API.
+
+### Rules
+
+1. Use function/span names as the operation name.
+   - Do not add an `operation = "..."` span field.
+2. Do not attach high-cardinality identifiers to span attributes.
+   - Do not put `txn_id`, `transaction_hash`, or `handle` on spans.
+   - If needed for debugging, log these values in events/log lines.
+3. For async work, instrument futures with `.instrument(...)`.
+   - Do not keep `span.enter()` guards alive across `.await`.
+4. Set OTEL error status on error exits.
+   - Logging an error is not enough for trace error visibility.
+5. Keep span fields low-cardinality and useful for aggregation.
+   - Good examples: `request_id`, counts, booleans, retry bucket, chain id.
+
+### Preferred snippets
+
+```rust
+#[tracing::instrument(skip_all)]
+async fn process_proof(...) -> anyhow::Result<()> {
+    // business logic
+    Ok(())
+}
+```
+
+```rust
+use tracing::Instrument;
+
+let db_insert_span = tracing::info_span!("db_insert", request_id);
+async {
+    sqlx::query("UPDATE ...").execute(pool).await?;
+    Ok::<(), sqlx::Error>(())
+}
+.instrument(db_insert_span.clone())
+.await?;
+```
+
+```rust
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+if let Err(err) = do_work().instrument(span.clone()).await {
+    span.context().span().set_status(opentelemetry::trace::Status::error(err.to_string()));
+    return Err(err.into());
+}
+```
+
+
+## Resources
+
+### Documentation
+
+Full, comprehensive documentation is available here: [https://docs.zama.ai/fhevm](https://docs.zama.ai/fhevm).
+
+### FHEVM Demo
+
+A complete demo showcasing an integrated FHEVM blockchain and KMS (Key Management System) is available here: [https://github.com/zama-ai/fhevm-test-suite/](https://github.com/zama-ai/fhevm-test-suite/).
+
+
+## Support
+
+<a target="_blank" href="https://community.zama.ai">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../docs/.gitbook/assets/support-banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="../docs/.gitbook/assets/support-banner-light.png">
+  <img alt="Support">
+</picture>
+</a>
+
+🌟 If you find this project helpful or interesting, please consider giving it a star on GitHub! Your support helps to grow the community and motivates further development.
+
+[![GitHub stars](https://img.shields.io/github/stars/zama-ai/fhevm?style=social)](https://github.com/zama-ai/fhevm/)

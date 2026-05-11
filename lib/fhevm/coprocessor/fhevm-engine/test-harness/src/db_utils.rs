@@ -1,0 +1,333 @@
+use alloy::primitives::U256;
+use fhevm_engine_common::db_keys::write_large_object_in_chunks;
+use fhevm_engine_common::tfhe_ops::current_ciphertext_version;
+use rand::distr::Alphanumeric;
+use rand::Rng;
+use sqlx::postgres::types::Oid;
+use sqlx::{query, PgPool};
+use std::time::Duration;
+use tokio::fs;
+use tokio::io::AsyncReadExt;
+use tokio::time::sleep;
+use tracing::info;
+
+pub const ACL_CONTRACT_ADDR: &str = "0x339EcE85B9E11a3A3AA557582784a15d7F82AAf2";
+
+/// Uploads a file to the database as a large object and returns its Oid
+pub async fn import_file_into_db(pool: &PgPool, file_path: &str) -> Result<Oid, sqlx::Error> {
+    let mut file = fs::File::open(file_path)
+        .await
+        .expect("Failed to open file");
+
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .await
+        .expect("Failed to read file");
+
+    let oid = write_large_object_in_chunks(pool, &buffer, 16 * 1024)
+        .await
+        .expect("Writing a large object should succeed");
+
+    info!("Uploaded large object with Oid: {:?}", oid);
+
+    Ok(oid)
+}
+
+pub async fn insert_ciphertext64(
+    pool: &sqlx::PgPool,
+    handle: &Vec<u8>,
+    ciphertext: &Vec<u8>,
+) -> anyhow::Result<()> {
+    let _ = query!(
+        "INSERT INTO ciphertexts(handle, ciphertext, ciphertext_version, ciphertext_type) 
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING;",
+        handle,
+        ciphertext,
+        current_ciphertext_version(),
+        0,
+    )
+    .execute(pool)
+    .await
+    .expect("insert into ciphertexts");
+
+    Ok(())
+}
+
+pub async fn insert_into_pbs_computations(
+    pool: &sqlx::PgPool,
+    host_chain_id: i64,
+    handle: &Vec<u8>,
+) -> Result<(), anyhow::Error> {
+    let _ = query!(
+        "INSERT INTO pbs_computations(handle, host_chain_id) VALUES($1, $2) 
+             ON CONFLICT DO NOTHING;",
+        handle,
+        host_chain_id,
+    )
+    .execute(pool)
+    .await
+    .expect("insert into pbs_computations");
+
+    Ok(())
+}
+
+pub async fn insert_ciphertext_digest(
+    pool: &PgPool,
+    host_chain_id: i64,
+    key_id_gw: [u8; 32],
+    handle: &[u8; 32],
+    ciphertext: &[u8],
+    ciphertext128: &[u8],
+    txn_limited_retries_count: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO ciphertext_digest (host_chain_id, key_id_gw, handle, ciphertext, ciphertext128, txn_limited_retries_count)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+        host_chain_id,
+        &key_id_gw,
+        handle,
+        ciphertext,
+        ciphertext128,
+        txn_limited_retries_count,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+// Poll database until ciphertext128 of the specified handle is available
+pub async fn wait_for_ciphertext(
+    pool: &sqlx::PgPool,
+    handle: &Vec<u8>,
+    retries: u64,
+) -> anyhow::Result<Vec<u8>> {
+    for retry in 0..retries {
+        let record = sqlx::query!(
+            "SELECT ciphertext FROM ciphertexts128 WHERE handle = $1",
+            handle
+        )
+        .fetch_one(pool)
+        .await;
+
+        if let Ok(record) = record {
+            if let Some(ciphertext128) = record.ciphertext.filter(|c| !c.is_empty()) {
+                return Ok(ciphertext128);
+            }
+        }
+
+        println!("wait for ciphertext, retry: {}", retry);
+
+        // Wait before retrying
+        sleep(Duration::from_millis(300)).await;
+    }
+
+    Err(sqlx::Error::RowNotFound.into())
+}
+
+/// Inserts new set of keys into the database with the specified ACL contract address.
+///
+/// # Arguments
+/// * `pool` - The database connection pool
+/// * `with_sns_pk` - Enables the importing of SNS sks key which usually is 1.5GB in size
+pub async fn setup_test_key(
+    pool: &sqlx::PgPool,
+    with_sns_pk: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let gpu_enabled = cfg!(feature = "gpu");
+    info!(gpu_enabled, "Setting up test key...");
+
+    let (sks, cks, pks, pp, sns_pk) = if !cfg!(feature = "gpu") {
+        (
+            "../fhevm-keys/sks",
+            "../fhevm-keys/cks",
+            "../fhevm-keys/pks",
+            "../fhevm-keys/pp",
+            "../fhevm-keys/sns_pk",
+        )
+    } else {
+        (
+            "../fhevm-keys/gpu-csks",
+            "../fhevm-keys/gpu-cks",
+            "../fhevm-keys/gpu-pks",
+            "../fhevm-keys/gpu-pp",
+            "../fhevm-keys/gpu-csks",
+        )
+    };
+    let sks = tokio::fs::read(sks).await.expect("can't read sks key");
+    let pks = tokio::fs::read(pks).await.expect("can't read pks key");
+    let cks = tokio::fs::read(cks).await.expect("can't read cks key");
+    let public_params = tokio::fs::read(pp).await.expect("can't read public params");
+
+    let sns_pk_oid = if with_sns_pk {
+        import_file_into_db(pool, sns_pk).await?
+    } else {
+        Oid::default()
+    };
+
+    info!("Uploaded sns_pk with Oid: {:?}", sns_pk_oid);
+
+    let key_id: i32 = rand::rng().random_range(1..10000);
+    let key_id = U256::from(key_id).to_be_bytes::<32>();
+
+    let key_id_gw: i32 = rand::rng().random_range(1..10000);
+    let key_id_gw = U256::from(key_id_gw).to_be_bytes::<32>();
+
+    sqlx::query!(
+        "
+            INSERT INTO keys(key_id, key_id_gw, pks_key, sks_key, cks_key, sns_pk)
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6
+            )
+        ",
+        &key_id,
+        &key_id_gw,
+        &pks,
+        &sks,
+        &cks,
+        sns_pk_oid
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        "
+            INSERT INTO crs(crs_id, crs)
+            VALUES (
+                ''::BYTEA,
+                $1
+            )
+        ",
+        &public_params
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        "
+            INSERT INTO host_chains (chain_id, name, acl_contract_address)
+            VALUES (
+                12345,
+                'test chain',
+                $1
+            )
+        ",
+        ACL_CONTRACT_ADDR
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn insert_random_keys_and_host_chain(
+    pool: &PgPool,
+) -> Result<(i64, [u8; 32]), sqlx::Error> {
+    let host_chain_id: i64 = rand::rng().random_range(1..10000);
+    let key_id_i32: i32 = rand::rng().random_range(1..10000);
+    let key_id_gw_i32: i32 = rand::rng().random_range(1..10000);
+
+    let verifying_contract_address: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(42)
+        .map(char::from)
+        .collect();
+
+    let acl_contract_address: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(42)
+        .map(char::from)
+        .collect();
+
+    info!(
+        "Dummy data host_chain_id: {}, key_id: {}, acl_addr: {}, verify_addr: {}",
+        host_chain_id, key_id_i32, acl_contract_address, verifying_contract_address
+    );
+
+    let pks_key: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let sks_key: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let public_params: Vec<u8> = (0..64).map(|_| rand::random::<u8>()).collect();
+    let key_id = U256::from(key_id_i32).to_be_bytes::<32>();
+    let key_id_gw = U256::from(key_id_gw_i32).to_be_bytes::<32>();
+
+    sqlx::query!(
+        "
+            INSERT INTO keys(key_id, key_id_gw, pks_key, sks_key)
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4
+            )
+        ",
+        &key_id,
+        &key_id_gw,
+        &pks_key,
+        &sks_key,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        "
+            INSERT INTO crs(crs_id, crs)
+            VALUES (
+                ''::BYTEA,
+                $1
+            )
+        ",
+        &public_params
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        "
+            INSERT INTO host_chains (chain_id, name, acl_contract_address)
+            VALUES (
+                $1,
+                'test chain',
+                $2
+            )
+        ",
+        host_chain_id,
+        acl_contract_address
+    )
+    .execute(pool)
+    .await?;
+
+    Ok((host_chain_id, key_id))
+}
+
+/// Returns the revert_coprocessor_db_state SQL script with psql variables substituted.
+/// This allows running the production script via sqlx without a psql layer.
+pub fn revert_coprocessor_db_state_sql(chain_id: i64, to_block_number: i64) -> String {
+    let raw = include_str!("../../db-migration/db-scripts/revert_coprocessor_db_state.sql");
+    let mut sql = String::new();
+    for line in raw.lines() {
+        if line.starts_with("\\set ") {
+            continue;
+        }
+        sql.push_str(line);
+        sql.push('\n');
+    }
+    sql = sql.replace(":'chain_id'", &chain_id.to_string());
+    sql = sql.replace(":'to_block_number'", &to_block_number.to_string());
+    sql
+}
+
+pub async fn truncate_tables(db_pool: &sqlx::PgPool, tables: Vec<&str>) -> Result<(), sqlx::Error> {
+    for table in tables {
+        let query = format!("TRUNCATE {}", table);
+        sqlx::query(&query).execute(db_pool).await?;
+    }
+    Ok(())
+}

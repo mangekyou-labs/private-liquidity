@@ -1,0 +1,26 @@
+{{- if .Values.persistence.volumeClaim.create }}
+{{- $volumeName := include "scVolumeName" . }}
+{{- $dataSource := .Values.persistence.volumeClaim.dataSource | default dict }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $volumeName }}
+  labels:
+    app: fhevm-sc-deploy
+    app.kubernetes.io/name: {{ $volumeName }}
+spec:
+  storageClassName: {{ .Values.persistence.volumeClaim.storageClassName }}
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.persistence.volumeClaim.storageCapacity }}
+  {{- /* Restore from CSI VolumeSnapshot: https://kubernetes.io/docs/concepts/storage/volume-snapshots/ */}}
+  {{- if and $dataSource.enabled $dataSource.name }}
+  dataSource:
+    name: {{ $dataSource.name }}
+    kind: {{ $dataSource.kind | default "VolumeSnapshot" }}
+    apiGroup: {{ $dataSource.apiGroup | default "snapshot.storage.k8s.io" }}
+  {{- end }}
+---
+{{- end }}

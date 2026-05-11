@@ -1,0 +1,1064 @@
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {UnsafeUpgrades} from "@openzeppelin/foundry-upgrades/src/Upgrades.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
+import {InputVerifier} from "../../contracts/InputVerifier.sol";
+import {ACL} from "../../contracts/ACL.sol";
+import {EmptyUUPSProxy} from "../../contracts/emptyProxy/EmptyUUPSProxy.sol";
+import {FheType} from "../../contracts/shared/FheType.sol";
+import {FHEVMExecutor} from "../../contracts/FHEVMExecutor.sol";
+import {ACLOwnable} from "../../contracts/shared/ACLOwnable.sol";
+import {aclAdd} from "../../addresses/FHEVMHostAddresses.sol";
+
+contract InputVerifierTest is Test {
+    InputVerifier internal inputVerifier;
+
+    uint256 internal constant initialThreshold = 1;
+    address internal constant verifyingContractSource = address(10000);
+    address internal constant owner = address(456);
+    uint8 internal constant HANDLE_VERSION = 0;
+
+    /// @dev Signer variables.
+    uint256 internal constant privateKeySigner0 = 0x022;
+    uint256 internal constant privateKeySigner1 = 0x03;
+    uint256 internal constant privateKeySigner2 = 0x04;
+    uint256 internal constant privateKeySigner3 = 0x05;
+    uint256 internal constant privateKeySigner4 = 0x06;
+    address[] internal activeSigners;
+    mapping(address => uint256) internal signerPrivateKeys;
+    address internal signer0;
+    address internal signer1;
+    address internal signer2;
+    address internal signer3;
+    address internal signer4;
+
+    /// @dev Proxy and implementation variables
+    address internal proxy;
+    address internal implementation;
+
+    /**
+     * @dev Computes the signature for a given digest using the provided private key.
+     * @param privateKey The private key used to sign the digest.
+     * @param digest The hash of the data to be signed.
+     * @return signature The computed signature as a byte array, encoded as {r}{s}{v}.
+     */
+    function _computeSignature(uint256 privateKey, bytes32 digest) internal pure returns (bytes memory signature) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    /**
+     * @dev Computes the EIP-712 digest for a given set of inputs.
+     *
+     * This function generates a digest by hashing the provided data using the EIP-712 standard.
+     * It combines the domain separator and the struct hash to produce a unique digest.
+     *
+     * @param handlesList An array of bytes32 values representing the handles list.
+     * @param userAddress The address of the user for whom the digest is being computed.
+     * @param contractAddress The address of the contract involved in the computation.
+     * @param chainId The chain ID of the blockchain network.
+     *
+     * @return bytes32 The computed EIP-712 digest.
+     */
+    function _computeDigest(
+        bytes32[] memory handlesList,
+        address userAddress,
+        address contractAddress,
+        uint256 chainId,
+        bytes memory extraData
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                inputVerifier.EIP712_INPUT_VERIFICATION_TYPEHASH(),
+                keccak256(abi.encodePacked(handlesList)),
+                userAddress,
+                contractAddress,
+                chainId,
+                keccak256(abi.encodePacked(extraData))
+            )
+        );
+
+        bytes32 hashTypeData = MessageHashUtils.toTypedDataHash(_computeDomainSeparator(), structHash);
+        return hashTypeData;
+    }
+
+    /**
+     * @dev Computes the EIP-712 domain separator.
+     * This function retrieves the domain parameters from the `inputVerifier` contract,
+     * including the name, version, chain ID, and verifying contract address.
+     * It then encodes these parameters and hashes them using the keccak256 algorithm
+     * to produce the domain separator.
+     *
+     * @return bytes32 The computed domain separator.
+     */
+    function _computeDomainSeparator() internal view returns (bytes32) {
+        (, string memory name, string memory version, uint256 chainId, address verifyingContract, , ) = inputVerifier
+            .eip712Domain();
+
+        return
+            keccak256(
+                abi.encode(
+                    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                    keccak256(bytes(name)),
+                    keccak256(bytes(version)),
+                    chainId,
+                    verifyingContract
+                )
+            );
+    }
+
+    /**
+     * @dev Internal function to deploy a UUPS proxy contract.
+     * The proxy is deployed using the UnsafeUpgrades library and initialized with the owner address.
+     */
+    function _deployProxy() internal {
+        proxy = UnsafeUpgrades.deployUUPSProxy(
+            address(new EmptyUUPSProxy()),
+            abi.encodeCall(EmptyUUPSProxy.initialize, ())
+        );
+    }
+
+    /**
+     * @dev Internal function to deploy and etch ACL contract at expected constant address.
+     * Also stores `owner` as ACL's owner, this is needed for ownership of core contracts.
+     */
+    function _deployAndEtchACL() internal {
+        address _acl = address(new ACL());
+        bytes memory code = _acl.code;
+        vm.etch(aclAdd, code);
+        vm.store(
+            aclAdd,
+            0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300, // OwnableStorageLocation
+            bytes32(uint256(uint160(owner)))
+        );
+    }
+
+    /**
+     * @dev Internal function to upgrade a proxy contract to a new implementation of `InputVerifier`.
+     *
+     * This function deploys a new instance of the `InputVerifier` contract and upgrades the proxy
+     * to use the new implementation. It also reinitializes the proxy with the provided parameters.
+     *
+     * @param signers An array of addresses representing the signers to be used during reinitialization.
+     *
+     * The function performs the following steps:
+     * 1. Deploys a new `InputVerifier` contract and sets its address as the new implementation.
+     * 2. Uses `UnsafeUpgrades.upgradeProxy` to upgrade the proxy to the new implementation.
+     *    - Passes the encoded call to `InputVerifier.initializeFromEmptyProxy` with the required parameters:
+     *      - `verifyingContractSource`: The source of the verifying contract.
+     *      - `uint64(block.chainid)`: The chain ID of the current blockchain.
+     *      - `signers`: The array of signers.
+     *    - `owner`: The owner of the proxy.
+     * 3. Updates the `inputVerifier` reference to point to the proxy.
+     */
+    function _upgradeProxy(address[] memory signers) internal {
+        implementation = address(new InputVerifier());
+        UnsafeUpgrades.upgradeProxy(
+            proxy,
+            implementation,
+            abi.encodeCall(
+                InputVerifier.initializeFromEmptyProxy,
+                (verifyingContractSource, uint64(block.chainid), signers, initialThreshold)
+            ),
+            owner
+        );
+        inputVerifier = InputVerifier(proxy);
+    }
+
+    /**
+     * @dev Initializes signer addresses and maps them to their private keys.
+     */
+    function _initializeSigners() internal {
+        signer0 = vm.addr(privateKeySigner0);
+        signer1 = vm.addr(privateKeySigner1);
+        signer2 = vm.addr(privateKeySigner2);
+        signer3 = vm.addr(privateKeySigner3);
+        signer4 = vm.addr(privateKeySigner4);
+
+        signerPrivateKeys[signer0] = privateKeySigner0;
+        signerPrivateKeys[signer1] = privateKeySigner1;
+        signerPrivateKeys[signer2] = privateKeySigner2;
+        signerPrivateKeys[signer3] = privateKeySigner3;
+        signerPrivateKeys[signer4] = privateKeySigner4;
+    }
+
+    /**
+     * @dev Appends metadata to `prehandle` by modifying specific bytes.
+     * - Clears bytes 21-31.
+     * - Sets byte 21 to `0x00`.
+     * - Inserts `chainId`, `fheType`, and `handleVersion` into respective bytes.
+     * @return result Modified `prehandle` with metadata.
+     */
+    function _appendMetadataToPrehandle(
+        FheType fheType,
+        bytes32 prehandle,
+        uint256 chainId,
+        uint8 handleVersion
+    ) internal view virtual returns (bytes32 result) {
+        /// @dev Clear bytes 21-31.
+        result = prehandle & 0xffffffffffffffffffffffffffffffffffffffffff0000000000000000000000;
+        /// @dev Set byte 21 to 0x00 to make sure it passes the check in InputVerifier (since the number of handles is always not null)
+        result = result | (bytes32(uint256(0x00)) << 80);
+        /// @dev chainId is cast to uint64 first to make sure it does not take more than 8 bytes before shifting.
+        /// If EIP2294 gets approved, it will force the chainID's size to be lower than MAX_UINT64.
+        result = result | (bytes32(uint256(uint64(chainId))) << 16);
+        /// @dev Insert handleType into byte 30.
+        result = result | (bytes32(uint256(uint8(fheType))) << 8);
+        /// @dev Insert HANDLE_VERSION into byte 31.
+        result = result | bytes32(uint256(handleVersion));
+    }
+
+    /**
+     * @dev Computes a mock handle by hashing the input value and appending metadata.
+     * @param value The input value to be hashed.
+     * @param fheType The FHE (Fully Homomorphic Encryption) type associated with the handle.
+     * @param chainId The ID of the blockchain network.
+     * @param handleVersion The version of the handle format.
+     * @return handle The computed handle as a bytes32 value.
+     */
+    function computeMockHandle(
+        bytes32 value,
+        FheType fheType,
+        uint256 chainId,
+        uint8 handleVersion
+    ) internal view returns (bytes32 handle) {
+        bytes32 prehandle = keccak256(abi.encodePacked(value));
+        handle = _appendMetadataToPrehandle(fheType, prehandle, chainId, handleVersion);
+    }
+
+    /**
+     * @dev Computes an input proof by encoding the provided handles and signatures.
+     *      The resulting proof is a concatenation of the number of handles, the number
+     *      of signatures, the handles themselves, and the signatures.
+     *
+     * @param handles An array of bytes32 values representing the handles.
+     * @param signatures An array of bytes representing the signatures.
+     * @return inputProof A bytes array containing the encoded input proof.
+     */
+    function _computeInputProof(
+        bytes32[] memory handles,
+        bytes[] memory signatures,
+        bytes memory extraData
+    ) internal pure returns (bytes memory inputProof) {
+        inputProof = abi.encodePacked(uint8(handles.length), uint8(signatures.length), handles);
+        for (uint256 i = 0; i < signatures.length; i++) {
+            inputProof = abi.encodePacked(inputProof, signatures[i]);
+        }
+        inputProof = abi.encodePacked(inputProof, extraData);
+    }
+
+    /**
+     * @dev Generates signatures for the given inputs.
+     * @param handles Handles included in the digest.
+     * @param userAddress User's address.
+     * @param contractAddress Contract's address.
+     * @param signers Signers' addresses.
+     * @param chainId Blockchain network ID.
+     * @param extraData Generic bytes metadata for versioned payloads.
+     * @return signatures Array of generated signatures.
+     */
+    function _generateSignatures(
+        bytes32[] memory handles,
+        address userAddress,
+        address contractAddress,
+        address[] memory signers,
+        uint256 chainId,
+        bytes memory extraData
+    ) internal view returns (bytes[] memory signatures) {
+        signatures = new bytes[](signers.length);
+        for (uint256 i = 0; i < signers.length; i++) {
+            /// @dev The signer address must have its private key in the mapping.
+            assert(signerPrivateKeys[signers[i]] != 0);
+            bytes32 digest = _computeDigest(handles, userAddress, contractAddress, chainId, extraData);
+            signatures[i] = _computeSignature(signerPrivateKeys[signers[i]], digest);
+        }
+    }
+
+    /**
+     * @dev Generates input parameters for FHEVMExecutor context.
+     *
+     * @param cleartextValues Cleartext values for handles.
+     * @param fheTypes FHE types for each cleartext value.
+     * @param userAddress User's address.
+     * @param contractAddress Contract's address.
+     * @param chainId Blockchain ID.
+     * @param extraData Generic bytes metadata for versioned payloads.
+     * @param handleVersion Handle version.
+     * @param signers Signers' addresses.
+     *
+     * @return context Context with user and contract addresses.
+     * @return mockInputHandle Computed input handle.
+     * @return inputProof Computed input proof.
+     *
+     * @notice Asserts `cleartextValues` and `fheTypes` lengths match.
+     */
+    function _generateMockInputParameters(
+        bytes32[] memory cleartextValues,
+        FheType[] memory fheTypes,
+        address userAddress,
+        address contractAddress,
+        uint256 chainId,
+        bytes memory extraData,
+        uint8 handleVersion,
+        address[] memory signers
+    )
+        internal
+        view
+        returns (FHEVMExecutor.ContextUserInputs memory context, bytes32 mockInputHandle, bytes memory inputProof)
+    {
+        assert(cleartextValues.length == fheTypes.length && cleartextValues.length > 0);
+        bytes32[] memory handles = new bytes32[](cleartextValues.length);
+
+        for (uint256 i = 0; i < cleartextValues.length; i++) {
+            handles[i] = computeMockHandle(cleartextValues[i], fheTypes[i], chainId, handleVersion);
+        }
+
+        /// @dev The first handle is used as the input handle for mock purposes.
+        mockInputHandle = handles[0];
+
+        bytes[] memory signatures = _generateSignatures(
+            handles,
+            userAddress,
+            contractAddress,
+            signers,
+            chainId,
+            extraData
+        );
+        inputProof = _computeInputProof(handles, signatures, extraData);
+
+        context.userAddress = userAddress;
+        context.contractAddress = contractAddress;
+    }
+
+    /**
+     * @dev Generates input parameters with a single mock handle for testing.
+     * @param chainId Blockchain ID.
+     * @param handleVersion Handle version.
+     * @param signers Signers' addresses.
+     * @return context Context with user and contract addresses.
+     * @return mockInputHandle Mock input handle.
+     * @return inputProof Input proof.
+     */
+    function _generateInputParametersWithOneMockHandle(
+        uint256 chainId,
+        uint8 handleVersion,
+        address[] memory signers
+    )
+        internal
+        view
+        returns (FHEVMExecutor.ContextUserInputs memory context, bytes32 mockInputHandle, bytes memory inputProof)
+    {
+        address userAddress = address(1234);
+        address contractAddress = address(2222);
+        bytes32[] memory cleartextValues = new bytes32[](1);
+        FheType[] memory fheTypes = new FheType[](1);
+        fheTypes[0] = FheType.Uint64;
+        cleartextValues[0] = bytes32(uint256(250));
+
+        return
+            _generateMockInputParameters(
+                cleartextValues,
+                fheTypes,
+                userAddress,
+                contractAddress,
+                chainId,
+                hex"00",
+                handleVersion,
+                signers
+            );
+    }
+
+    /**
+     * @dev Upgrades the proxy with a specified number of signers (1-5).
+     * Adds signers (signer0 to signer4) to `activeSigners` based on `numberSigners`.
+     * Calls `_upgradeProxy` with the updated `activeSigners`.
+     *
+     * @param numberSigners Number of signers (1-5).
+     */
+    function _upgradeProxyWithSigners(uint256 numberSigners) internal {
+        assert(numberSigners > 0 && numberSigners < 6);
+
+        if (numberSigners >= 1) {
+            activeSigners.push(signer0);
+        }
+        if (numberSigners >= 2) {
+            activeSigners.push(signer1);
+        }
+        if (numberSigners >= 3) {
+            activeSigners.push(signer2);
+        }
+        if (numberSigners >= 4) {
+            activeSigners.push(signer3);
+        }
+        if (numberSigners == 5) {
+            activeSigners.push(signer4);
+        }
+
+        _upgradeProxy(activeSigners);
+    }
+
+    /**
+     * @dev Sets up the testing environment by deploying a proxy contract and initializing signers.
+     * This function is executed before each test to ensure a consistent and isolated state.
+     */
+    function setUp() public {
+        _deployProxy();
+        _initializeSigners();
+        _deployAndEtchACL();
+    }
+
+    /**
+     * @dev Tests that the contract is reinitialized correctly.
+     * It verifies that the version and threshold are set correctly after the upgrade.
+     */
+    function test_PostProxyUpgradeCheck() public {
+        _upgradeProxyWithSigners(3);
+        assertEq(inputVerifier.getVersion(), string(abi.encodePacked("InputVerifier v0.2.0")));
+        assertEq(inputVerifier.getThreshold(), initialThreshold);
+    }
+
+    /**
+     * @dev Tests that getCoprocessorSigners view function works as expected.
+     */
+    function test_GetCoprocessorSigners() public {
+        uint256 numberSigners = 3;
+        _upgradeProxyWithSigners(numberSigners);
+        address[] memory signers = inputVerifier.getCoprocessorSigners();
+        assertEq(signers.length, numberSigners);
+        assertEq(signers[0], signer0);
+        assertEq(signers[1], signer1);
+        for (uint256 i = 0; i < numberSigners; i++) {
+            assertTrue(inputVerifier.isSigner(signers[i]));
+        }
+    }
+
+    /**
+     * @dev Tests that only the contract owner can add a signer.
+     */
+    function test_OnlyOwnerCanDefineNewContext(address randomAccount) public {
+        vm.assume(randomAccount != owner);
+        _upgradeProxyWithSigners(3);
+        address randomSigner = address(42);
+        vm.expectPartialRevert(ACLOwnable.NotHostOwner.selector);
+        vm.prank(randomAccount);
+        address[] memory newSigners = new address[](1);
+        newSigners[0] = randomSigner;
+        inputVerifier.defineNewContext(newSigners, 1);
+    }
+
+    /**
+     * @dev Tests that the contract owner cannot add a null address as a signer.
+     */
+    function test_OwnerCannotAddNullAddressAsSigner() public {
+        _upgradeProxyWithSigners(3);
+        address nullSigner = address(0);
+        address[] memory newSigners = new address[](1);
+        newSigners[0] = nullSigner;
+        vm.expectPartialRevert(InputVerifier.CoprocessorSignerNull.selector);
+        vm.prank(owner);
+        inputVerifier.defineNewContext(newSigners, 1);
+    }
+
+    /**
+     * @dev Tests that the owner of the contract can successfully add a new signer.
+     */
+    function test_OwnerCanAddNewSigner() public {
+        _upgradeProxyWithSigners(3);
+        address randomSigner = address(42);
+        address[] memory newSigners = new address[](1);
+        newSigners[0] = randomSigner;
+        vm.prank(owner);
+        vm.expectEmit();
+        emit InputVerifier.NewContextSet(newSigners, 1);
+        inputVerifier.defineNewContext(newSigners, 1);
+        assertEq(inputVerifier.getCoprocessorSigners()[0], randomSigner);
+        assertTrue(inputVerifier.isSigner(randomSigner));
+    }
+
+    /**
+     * @dev Tests that the contract owner cannot add the same signer twice.
+     */
+    function test_OwnerCannotAddSameSignerTwice() public {
+        test_OwnerCanAddNewSigner();
+        address randomSigner = inputVerifier.getCoprocessorSigners()[0];
+        address[] memory newSigners = new address[](2);
+        newSigners[0] = randomSigner;
+        newSigners[1] = randomSigner;
+        vm.prank(owner);
+        vm.expectRevert(InputVerifier.CoprocessorAlreadySigner.selector);
+        inputVerifier.defineNewContext(newSigners, 1);
+    }
+
+    /**
+     * @dev Tests that the owner can successfully remove a signer.
+     */
+    function test_OwnerCanRemoveSigner() public {
+        /// @dev We call the other test to avoid repeating the same code.
+        test_OwnerCanAddNewSigner();
+
+        address randomSigner = address(43);
+        vm.startPrank(owner);
+
+        address[] memory newSigners = new address[](2);
+        newSigners[0] = address(42);
+        newSigners[1] = randomSigner;
+        inputVerifier.defineNewContext(newSigners, 2);
+        assertEq(inputVerifier.getCoprocessorSigners().length, 2);
+
+        address[] memory newSigners2 = new address[](1);
+        newSigners2[0] = address(42);
+        inputVerifier.defineNewContext(newSigners2, 1);
+        assertFalse(inputVerifier.isSigner(randomSigner));
+        assertEq(inputVerifier.getCoprocessorSigners().length, 1);
+    }
+
+    /**
+     * @dev Test to ensure that the contract owner cannot remove the last signer.
+     * This function verifies that the contract logic prevents the removal of the
+     * final signer, maintaining at least one signer at all times.
+     */
+    function test_OwnerCannotRemoveTheLastSigner() public {
+        /// @dev We call the other test to avoid repeating the same code.
+        test_OwnerCanAddNewSigner();
+        address[] memory emptyAddress = new address[](0);
+        vm.prank(owner);
+        vm.expectRevert(InputVerifier.SignersSetIsEmpty.selector);
+        inputVerifier.defineNewContext(emptyAddress, 0);
+    }
+
+    /**
+     * @dev Tests that only the owner can set the threshold.
+     * @param randomAccount An address that is not the owner.
+     */
+    function test_OnlyOwnerCanSetThreshold(address randomAccount) public {
+        vm.assume(randomAccount != owner);
+        _upgradeProxyWithSigners(3);
+        vm.prank(randomAccount);
+        vm.expectPartialRevert(ACLOwnable.NotHostOwner.selector);
+        inputVerifier.setThreshold(2);
+    }
+
+    /**
+     * @dev Tests that the threshold value must not be set to 0.
+     */
+    function test_ThresholdMustBeNotSetToZero() public {
+        _upgradeProxyWithSigners(3);
+        vm.prank(owner);
+        vm.expectRevert(InputVerifier.ThresholdIsNull.selector);
+        inputVerifier.setThreshold(0);
+    }
+
+    /**
+     * @dev Tests that the threshold cannot be set if it is above the number of signers.
+     */
+    function test_ThresholdCannotBeSetIfAboveNumberOfSigners() public {
+        _upgradeProxyWithSigners(3);
+        vm.prank(owner);
+        vm.expectRevert(InputVerifier.ThresholdIsAboveNumberOfSigners.selector);
+        inputVerifier.setThreshold(4);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function works as expected for one input.
+     */
+    function test_VerifyInputWorksAsExpectedForOneInput(uint64 cleartextValue) public {
+        _upgradeProxyWithSigners(3);
+        address userAddress = address(1111);
+        address contractAddress = address(2222);
+        bytes memory extraData = hex"00";
+        bytes32[] memory cleartextValues = new bytes32[](1);
+        FheType[] memory fheTypes = new FheType[](1);
+        fheTypes[0] = FheType.Uint64;
+        cleartextValues[0] = bytes32(uint256(cleartextValue));
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateMockInputParameters(
+                cleartextValues,
+                fheTypes,
+                userAddress,
+                contractAddress,
+                block.chainid,
+                extraData,
+                HANDLE_VERSION,
+                activeSigners
+            );
+
+        vm.assertEq(mockInputHandle, inputVerifier.verifyInput(context, mockInputHandle, inputProof));
+    }
+
+    /**
+     * @dev Tests that the verifyInput function works as expected for two inputs.
+     */
+    function test_VerifyInputWorksAsExpectedForTwoInputs(uint64 cleartextValue, bool cleartextValue2) public {
+        _upgradeProxyWithSigners(3);
+
+        address userAddress = address(1111);
+        address contractAddress = address(2222);
+        bytes memory extraData = hex"00";
+
+        bytes32[] memory cleartextValues = new bytes32[](2);
+        FheType[] memory fheTypes = new FheType[](2);
+        fheTypes[0] = FheType.Uint64;
+        fheTypes[1] = FheType.Bool;
+
+        cleartextValues[0] = bytes32(uint256(cleartextValue));
+        cleartextValues[1] = bytes32(cleartextValue2 ? uint256(1) : uint256(0));
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateMockInputParameters(
+                cleartextValues,
+                fheTypes,
+                userAddress,
+                contractAddress,
+                block.chainid,
+                extraData,
+                HANDLE_VERSION,
+                activeSigners
+            );
+
+        vm.assertEq(mockInputHandle, inputVerifier.verifyInput(context, mockInputHandle, inputProof));
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the chainId is invalid.
+     */
+    function test_VerifyInputFailsIfInvalidChainId(uint64 invalidChainId) public {
+        _upgradeProxyWithSigners(3);
+        vm.assume(invalidChainId != block.chainid);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(invalidChainId, HANDLE_VERSION, activeSigners);
+
+        vm.expectRevert(InputVerifier.InvalidChainId.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the inputProof is empty.
+     */
+    function test_VerifyInputFailsIfEmptyInputProof() public {
+        _upgradeProxyWithSigners(3);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, activeSigners);
+
+        inputProof = new bytes(0);
+
+        vm.expectRevert(InputVerifier.EmptyInputProof.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the index is invalid since it is greater than 254.
+     */
+    function test_VerifyInputFailsIfInvalidIndexIfEqual255() public {
+        _upgradeProxyWithSigners(3);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, activeSigners);
+
+        /// @dev It is invalid since it is 255.
+        mockInputHandle = mockInputHandle | (bytes32(uint256(255)) << 80);
+
+        vm.expectRevert(InputVerifier.InvalidIndex.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the index is invalid since it is greater than 254.
+     */
+    function test_VerifyInputFailsIfInvalidIndexIfEqual255WithProofCached() public {
+        _upgradeProxyWithSigners(3);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, activeSigners);
+
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+
+        /// @dev It is invalid since it is 255.
+        mockInputHandle = mockInputHandle | (bytes32(uint256(255)) << 80);
+
+        vm.expectRevert(InputVerifier.InvalidIndex.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the index is invalid if it is greater than (or equal to) the number of handles.
+     */
+    function test_VerifyInputFailsIfInvalidIndexGreaterThanNumberHandles(uint8 indexHandle) public {
+        _upgradeProxyWithSigners(3);
+        vm.assume(indexHandle > 0 && indexHandle < 255);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, activeSigners);
+
+        /// @dev It is invalid since it is greater than (equal to) the number of handles.
+        mockInputHandle = mockInputHandle | (bytes32(uint256(indexHandle)) << 80);
+
+        vm.expectRevert(InputVerifier.InvalidIndex.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the index is invalid since it is greater than 254.
+     */
+    function test_VerifyInputFailsIfInvalidIndexGreaterThanNumberHandlesWithProofCached(uint8 indexHandle) public {
+        _upgradeProxyWithSigners(3);
+        vm.assume(indexHandle > 0 && indexHandle < 255);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, activeSigners);
+
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+
+        /// @dev It is invalid since it is greater than (equal to) the number of handles.
+        mockInputHandle = mockInputHandle | (bytes32(uint256(indexHandle)) << 80);
+
+        vm.expectRevert(InputVerifier.InvalidIndex.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the length of the input proof is invalid.
+     */
+    function test_VerifyInputFailsIfDeserializingInputProofFail() public {
+        _upgradeProxyWithSigners(3);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, activeSigners);
+
+        /// @dev We truncate the length of the input proof to make it incomplete.
+        bytes memory truncatedInputProof = new bytes(10);
+        for (uint256 i = 0; i < 10; i++) {
+            truncatedInputProof[i] = inputProof[i];
+        }
+
+        vm.expectRevert(InputVerifier.DeserializingInputProofFail.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, truncatedInputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the handle version is not the one matching the InputVerifier's contract storage.
+     */
+    function test_VerifyInputFailsIfInvalidHandleVersion(uint8 handleVersion) public {
+        _upgradeProxyWithSigners(3);
+        vm.assume(handleVersion != HANDLE_VERSION);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, handleVersion, activeSigners);
+
+        mockInputHandle = mockInputHandle | bytes32(uint256(handleVersion));
+
+        vm.expectRevert(InputVerifier.InvalidHandleVersion.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the inputHandle is invalid when the proof is not cached.
+     */
+    function test_VerifyInputFailsIfInvalidInputHandle() public {
+        _upgradeProxyWithSigners(3);
+        address userAddress = address(1111);
+        address contractAddress = address(2222);
+        uint64 initialCleartextValue = 123456789;
+        bytes memory extraData = hex"00";
+
+        FheType[] memory fheTypes = new FheType[](1);
+        bytes32[] memory cleartextValues = new bytes32[](1);
+        fheTypes[0] = FheType.Uint64;
+        cleartextValues[0] = bytes32(uint256(initialCleartextValue));
+
+        (FHEVMExecutor.ContextUserInputs memory context, , bytes memory inputProof) = _generateMockInputParameters(
+            cleartextValues,
+            fheTypes,
+            userAddress,
+            contractAddress,
+            block.chainid,
+            extraData,
+            HANDLE_VERSION,
+            activeSigners
+        );
+
+        uint64 updatedCleartextValue = 987654321;
+        cleartextValues[0] = bytes32(uint256(updatedCleartextValue));
+
+        (, bytes32 invalidInputHandle, ) = _generateMockInputParameters(
+            cleartextValues,
+            fheTypes,
+            userAddress,
+            contractAddress,
+            block.chainid,
+            extraData,
+            HANDLE_VERSION,
+            activeSigners
+        );
+
+        vm.expectRevert(InputVerifier.InvalidInputHandle.selector);
+        inputVerifier.verifyInput(context, invalidInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the inputHandle is invalid when the proof is cached.
+     */
+    function test_VerifyInputFailsIfInvalidInputHandleWithProofCached() public {
+        _upgradeProxyWithSigners(3);
+        address userAddress = address(1111);
+        address contractAddress = address(2222);
+        uint64 initialCleartextValue = 123456789;
+        bytes memory extraData = hex"00";
+
+        FheType[] memory fheTypes = new FheType[](1);
+        bytes32[] memory cleartextValues = new bytes32[](1);
+        fheTypes[0] = FheType.Uint64;
+        cleartextValues[0] = bytes32(uint256(initialCleartextValue));
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateMockInputParameters(
+                cleartextValues,
+                fheTypes,
+                userAddress,
+                contractAddress,
+                block.chainid,
+                extraData,
+                HANDLE_VERSION,
+                activeSigners
+            );
+
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+
+        uint64 updatedCleartextValue = 987654321;
+        cleartextValues[0] = bytes32(uint256(updatedCleartextValue));
+
+        (, bytes32 invalidInputHandle, ) = _generateMockInputParameters(
+            cleartextValues,
+            fheTypes,
+            userAddress,
+            contractAddress,
+            block.chainid,
+            extraData,
+            HANDLE_VERSION,
+            activeSigners
+        );
+
+        vm.expectRevert(InputVerifier.InvalidInputHandle.selector);
+        inputVerifier.verifyInput(context, invalidInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the signature threshold is not reached.
+     */
+    function test_VerifyInputFailsIfNumberOfSignaturesIsInferiorToThreshold() public {
+        _upgradeProxyWithSigners(3);
+
+        /// @dev The threshold is set to 2, so we need at least 2 signatures from different signers.
+        vm.prank(owner);
+        inputVerifier.setThreshold(2);
+        assertEq(inputVerifier.getThreshold(), 2);
+
+        /// @dev We only use one signer to generate the input parameters but the threshold is 2.
+        address[] memory signers = new address[](1);
+        signers[0] = signer0;
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, signers);
+
+        vm.expectPartialRevert(InputVerifier.SignatureThresholdNotReached.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verification of EIP-712 coprocessor signatures fails as expected if the same signer is used twice.
+     */
+    function test_VerifyInputFailsFailIfSameSignerIsUsedTwice() public {
+        _upgradeProxyWithSigners(3);
+
+        /// @dev The threshold is set to 2, so we need at least 2 signatures from different signers.
+        vm.prank(owner);
+        inputVerifier.setThreshold(2);
+        assertEq(inputVerifier.getThreshold(), 2);
+
+        /// @dev We use 2 signers (threshold is 2) but they are the same signer!
+        address[] memory signers = new address[](2);
+        signers[0] = signer0;
+        signers[1] = signer0;
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, signers);
+
+        vm.expectPartialRevert(InputVerifier.SignaturesVerificationFailed.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if an invalid signer address is recovered.
+     */
+    function test_VerifyInputFailsIfInvalidSignerIsRecovered() public {
+        _upgradeProxyWithSigners(3);
+
+        /// @dev The threshold is set to 2, so we need at least 2 signatures from different signers.
+        vm.prank(owner);
+        inputVerifier.setThreshold(2);
+        assertEq(inputVerifier.getThreshold(), 2);
+
+        /// @dev We use 2 signers (threshold is 2) but one of the signers is not a signer in the InputVerifier contract!
+        address[] memory signers = new address[](2);
+        signers[0] = signer0;
+        signers[1] = signer4;
+
+        assertFalse(inputVerifier.isSigner(signer4));
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, signers);
+
+        vm.expectPartialRevert(InputVerifier.InvalidSigner.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if the signatures verification fails for other reasons.
+     */
+    function test_VerifyInputFailsIfSignaturesVerificationFailed() public {
+        _upgradeProxyWithSigners(3);
+
+        /// @dev The threshold is set to 2, so we need at least 2 signatures from different signers.
+        vm.prank(owner);
+        inputVerifier.setThreshold(2);
+        assertEq(inputVerifier.getThreshold(), 2);
+
+        /// @dev We use 2 signers (threshold is 2) but it is the same signer!
+        address[] memory signers = new address[](2);
+        signers[0] = signer0;
+        signers[1] = signer0;
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, signers);
+
+        vm.expectRevert(InputVerifier.SignaturesVerificationFailed.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /**
+     * @dev Tests that the verifyInput function fails if no signature is provided.
+     */
+    function test_VerifyInputFailsIfNoSignatureIsProvided() public {
+        _upgradeProxyWithSigners(3);
+
+        /// @dev We use 0 signer.
+        address[] memory signers = new address[](0);
+
+        (
+            FHEVMExecutor.ContextUserInputs memory context,
+            bytes32 mockInputHandle,
+            bytes memory inputProof
+        ) = _generateInputParametersWithOneMockHandle(block.chainid, HANDLE_VERSION, signers);
+
+        vm.expectRevert(InputVerifier.ZeroSignature.selector);
+        inputVerifier.verifyInput(context, mockInputHandle, inputProof);
+    }
+
+    /// @dev This function exists for the test below to call it externally.
+    function upgrade(address randomAccount) external {
+        UnsafeUpgrades.upgradeProxy(proxy, address(new EmptyUUPSProxy()), "", randomAccount);
+    }
+
+    /**
+     * @dev Tests that only the owner can authorize an upgrade.
+     */
+    function test_OnlyOwnerCanAuthorizeUpgrade(address randomAccount) public {
+        _upgradeProxyWithSigners(3);
+        vm.assume(randomAccount != owner);
+        /// @dev Have to use external call to this to avoid this issue:
+        ///      https://github.com/foundry-rs/foundry/issues/5806
+        vm.expectPartialRevert(ACLOwnable.NotHostOwner.selector);
+        this.upgrade(randomAccount);
+    }
+
+    function test_OnlyOwnerCanAuthorizeUpgrade() public {
+        _upgradeProxyWithSigners(3);
+        /// @dev It does not revert since it called by the owner.
+        UnsafeUpgrades.upgradeProxy(proxy, address(new EmptyUUPSProxy()), "", owner);
+    }
+
+    /// @dev This function exists for the test below to call it externally.
+    function emptyUpgrade() public {
+        address[] memory emptySigners = new address[](0);
+        implementation = address(new InputVerifier());
+
+        UnsafeUpgrades.upgradeProxy(
+            proxy,
+            implementation,
+            abi.encodeCall(
+                InputVerifier.initializeFromEmptyProxy,
+                (verifyingContractSource, uint64(block.chainid), emptySigners, initialThreshold)
+            ),
+            owner
+        );
+    }
+
+    /**
+     * @dev Tests that the contract cannot be reinitialized if the initial signers set is empty.
+     */
+    function test_CannotReinitializeIfInitialSignersSetIsEmpty() public {
+        vm.expectPartialRevert(InputVerifier.SignersSetIsEmpty.selector);
+        this.emptyUpgrade();
+    }
+
+    /**
+     * @dev Tests that anyone can call cleanTransientStorage.
+     */
+    function test_AnyoneCanCallCleanTransientStorage(uint64 cleartextValue, address randomAccount) public {
+        /// @dev It inherits a working test since transient storage would be cleaned up after a call in the same transaction.
+        test_VerifyInputWorksAsExpectedForOneInput(cleartextValue);
+        vm.prank(randomAccount);
+        inputVerifier.cleanTransientStorage();
+    }
+}

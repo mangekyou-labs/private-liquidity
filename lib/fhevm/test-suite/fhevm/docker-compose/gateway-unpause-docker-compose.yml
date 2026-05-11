@@ -1,0 +1,17 @@
+services:
+  gateway-sc-unpause:
+    container_name: gateway-sc-unpause
+    image: ghcr.io/zama-ai/fhevm/gateway-contracts:${GATEWAY_VERSION}
+    build:
+      context: ../../../gateway-contracts
+      dockerfile: Dockerfile
+      cache_from:
+        - ${FHEVM_CACHE_FROM_GATEWAY_SC_UNPAUSE:-type=gha}
+      cache_to:
+        - ${FHEVM_CACHE_TO_GATEWAY_SC_UNPAUSE:-type=gha,mode=max}
+    env_file:
+      - ${FHEVM_STATE_DIR:-../../../.fhevm}/runtime/env/gateway-sc.env
+    command:
+      - npx hardhat compile && npx hardhat task:unpauseAllGatewayContracts
+    volumes:
+      - ${FHEVM_STATE_DIR:-../../../.fhevm}/runtime/addresses/gateway:/app/addresses  # workdir in gateway's Dockerfile is /app

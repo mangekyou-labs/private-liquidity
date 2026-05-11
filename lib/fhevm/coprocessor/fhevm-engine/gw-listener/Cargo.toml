@@ -1,0 +1,39 @@
+[package]
+name = "gw-listener"
+version = "0.7.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# workspace dependencies
+alloy = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+humantime = { workspace = true }
+prometheus = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tower-http = { workspace = true }
+
+fhevm-engine-common = { path = "../fhevm-engine-common" }
+fhevm_gateway_bindings = { path = "../../../gateway-contracts/rust_bindings" }
+
+[build-dependencies]
+foundry-compilers = { workspace = true }
+semver = { workspace = true }
+
+[dev-dependencies]
+alloy = { workspace = true, features = ["node-bindings"] }
+serial_test = { workspace = true }
+test-harness = { path = "../test-harness" }
+
+[lints]
+workspace = true

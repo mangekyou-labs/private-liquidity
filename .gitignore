@@ -1,0 +1,42 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development (and goerli) broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/*/5/
+/broadcast/**/dry-run/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+
+# Node modules
+node_modules/
+artifacts/
+cache_hardhat/
+typechain-types/
+
+.vscode
+
+.cursor/
+perpetuals/
+
+# Markdown files
+COMPREHENSIVE_SECURITY_REVIEW.md
+PERPS_PROTOCOL_COMPARISON.md
+PRIVACY_LIMITATIONS.md
+PROGRESS.md
+PITCH_DECK.md
+SWAP_PRIVACY_ANALYSIS.md
+IMPLEMENTATION_SUMMARY.md
+FHE_BEST_PRACTICES_ANALYSIS.md
+FHE_LEAKAGE_ANALYSIS.md
+
+# Security audit files
+SECURITY_AUDIT.md
+SECURITY_AUDIT_REPORT.md
+SECURITY_AUDIT_REPORT.md

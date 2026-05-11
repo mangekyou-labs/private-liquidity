@@ -1,0 +1,53 @@
+name: golden-container-images-docker-build-rust
+
+on:
+  workflow_dispatch:
+    inputs:
+      push-image:
+        description: "Push the image to the registry"
+        default: true
+        required: true
+        type: boolean
+      tag:
+        description: "Tag to use for the image"
+        default: ""
+        required: false
+        type: string
+      rust-version:
+        description: "The rust version to use"
+        default: "stable"
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: golden-rust-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    uses: zama-ai/ci-templates/.github/workflows/common-docker.yml@3cf4c2b133947d29e7a313555638621f9ca0345c # v1.0.3
+    secrets:
+      AWS_ACCESS_KEY_S3_USER: ${{ secrets.AWS_ACCESS_KEY_S3_USER }}
+      AWS_SECRET_KEY_S3_USER: ${{ secrets.AWS_SECRET_KEY_S3_USER }}
+      BLOCKCHAIN_ACTIONS_TOKEN: ${{ secrets.BLOCKCHAIN_ACTIONS_TOKEN }}
+      CGR_USERNAME: ${{ secrets.CGR_USERNAME }}
+      CGR_PASSWORD: ${{ secrets.CGR_PASSWORD }}
+    permissions:
+      actions: 'read' # Required to read workflow run information
+      contents: 'read' # Required to checkout repository code
+      pull-requests: 'read' # Required to read pull request information
+      attestations: 'write' # Required to create build attestations
+      packages: 'write' # Required to publish Docker images
+      id-token: 'write' # Required for OIDC authentication
+    with:
+      use-cgr-secrets: true
+      working-directory: "."
+      push_image: ${{ inputs.push-image }}
+      image-name: "fhevm/gci/rust-glibc"
+      image-tag: ${{ inputs.tag }}
+      rust-version: ${{ inputs.rust-version }}
+      docker-file: "./golden-container-images/rust-glibc/Dockerfile"
+      app-cache-dir: "fhevm-golden-rust"
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || '' }}

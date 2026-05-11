@@ -1,0 +1,263 @@
+use std::time::Duration;
+
+use alloy::providers::{ProviderBuilder, WsConnect};
+use alloy::{primitives::Address, transports::http::reqwest::Url};
+use clap::Parser;
+use fhevm_engine_common::database::{connect_pool_with_options, resolve_database_url_from_option};
+use fhevm_engine_common::{
+    drift_revert::{self, RevertRunnerConfig},
+    metrics_server, telemetry,
+    utils::DatabaseURL,
+};
+use gw_listener::gw_listener::GatewayListener;
+use gw_listener::http_server::HttpServer;
+use gw_listener::ConfigSettings;
+use humantime::parse_duration;
+use sqlx::postgres::PgPoolOptions;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, Level};
+
+#[derive(Parser, Debug, Clone)]
+#[command(version, about, long_about = None)]
+struct Conf {
+    #[arg(long)]
+    database_url: Option<DatabaseURL>,
+
+    #[arg(long, default_value_t = 16)]
+    database_pool_size: u32,
+
+    #[arg(long, default_value = "event_zkpok_new_work")]
+    verify_proof_req_database_channel: String,
+
+    #[arg(long)]
+    gw_url: Url,
+
+    #[arg(short, long)]
+    input_verification_address: Address,
+
+    #[arg(long, default_value_t = 1)]
+    error_sleep_initial_secs: u16,
+
+    #[arg(long, default_value_t = 10)]
+    error_sleep_max_secs: u16,
+
+    #[arg(long, default_value_t = 8080)]
+    health_check_port: u16,
+
+    /// Prometheus metrics server address
+    #[arg(long, default_value = "0.0.0.0:9100")]
+    metrics_addr: Option<String>,
+
+    #[arg(long, default_value = "4s", value_parser = parse_duration)]
+    health_check_timeout: Duration,
+
+    #[arg(long, default_value_t = u32::MAX)]
+    provider_max_retries: u32,
+
+    #[arg(long, default_value = "4s", value_parser = parse_duration)]
+    provider_retry_interval: Duration,
+
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(Level),
+        default_value_t = Level::INFO)]
+    log_level: Level,
+
+    #[arg(long, default_value = "500ms", value_parser = parse_duration)]
+    get_logs_poll_interval: Duration,
+
+    #[arg(long, default_value_t = 100)]
+    get_logs_block_batch_size: u64,
+
+    #[arg(long, default_value_t = 50)]
+    log_last_processed_every_number_of_updates: u64,
+
+    /// gw-listener service name in OTLP traces
+    #[arg(long, env = "OTEL_SERVICE_NAME", default_value = "gw-listener")]
+    pub service_name: String,
+
+    #[arg(
+        long,
+        requires = "gateway_config_address",
+        help = "CiphertextCommits contract address for drift detection"
+    )]
+    ciphertext_commits_address: Option<Address>,
+
+    #[arg(
+        long,
+        requires = "ciphertext_commits_address",
+        help = "GatewayConfig contract address used to fetch coprocessor tx-senders"
+    )]
+    gateway_config_address: Option<Address>,
+
+    /// How long to wait for the gateway to emit a consensus event after the
+    /// first submission is seen. Wall-clock duration — the default of 5 minutes
+    /// accommodates coprocessors that may be stuck for a few minutes.
+    #[arg(long, default_value = "5m", value_parser = parse_duration, requires = "ciphertext_commits_address")]
+    drift_no_consensus_timeout: Duration,
+
+    /// After consensus, how many additional blocks to wait for remaining
+    /// coprocessors to submit their ciphertext material. Wall-clock duration.
+    #[arg(long, default_value = "5m", value_parser = parse_duration, requires = "ciphertext_commits_address")]
+    drift_post_consensus_grace: Duration,
+
+    /// How long to wait after detecting a pending drift-revert signal before
+    /// running the revert SQL. Gives other services time to see the signal and
+    /// re-exec before the DB state changes.
+    #[arg(long, default_value = "60s", value_parser = parse_duration)]
+    drift_auto_revert_grace_period: Duration,
+
+    /// Enable automatic drift recovery. When false (default), the drift
+    /// detector still runs and logs drift, but no revert signal is created
+    /// and no automatic recovery kicks in. Opt-in while the feature rolls out.
+    /// Also readable from `DRIFT_AUTO_REVERT_ENABLED` env var.
+    #[arg(long, env = "DRIFT_AUTO_REVERT_ENABLED", default_value_t = false)]
+    drift_auto_revert_enabled: bool,
+
+    /// Maximum number of successful reverts allowed for a host chain within
+    /// `--drift-auto-revert-recent-attempts-window` before refusing further
+    /// reverts. Catches loops where each revert succeeds but drift recurs.
+    #[arg(long, default_value_t = 2)]
+    drift_auto_revert_max_recent_attempts: u32,
+
+    /// Time window over which `--drift-auto-revert-max-recent-attempts` is counted.
+    #[arg(long, default_value = "30m", value_parser = parse_duration)]
+    drift_auto_revert_recent_attempts_window: Duration,
+}
+
+fn install_signal_handlers(cancel_token: CancellationToken) -> anyhow::Result<()> {
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigint.recv() => (),
+            _ = sigterm.recv() => ()
+        }
+        cancel_token.cancel();
+    });
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let conf = Conf::parse();
+
+    let _otel_guard = telemetry::init_tracing_otel_with_logs_only_fallback(
+        conf.log_level,
+        &conf.service_name,
+        "otlp-layer",
+    );
+
+    info!(gateway_url = %conf.gw_url, max_retries = %conf.provider_max_retries,
+         retry_interval = ?conf.provider_retry_interval, "Connecting to Gateway");
+
+    let provider = loop {
+        match ProviderBuilder::new()
+            .connect_ws(
+                WsConnect::new(conf.gw_url.clone())
+                    .with_max_retries(conf.provider_max_retries)
+                    .with_retry_interval(conf.provider_retry_interval),
+            )
+            .await
+        {
+            Ok(provider) => {
+                info!(gateway_url = %conf.gw_url, "Connected to Gateway");
+                break provider;
+            }
+            Err(e) => {
+                error!(
+                    gateway_url = %conf.gw_url,
+                    error = %e,
+                    provider_retry_interval = ?conf.provider_retry_interval,
+                    "Failed to connect to Gateway"
+                );
+                tokio::time::sleep(conf.provider_retry_interval).await;
+            }
+        }
+    };
+
+    let cancel_token = CancellationToken::new();
+
+    let config = ConfigSettings {
+        database_url: resolve_database_url_from_option(conf.database_url.clone())?,
+        database_pool_size: conf.database_pool_size,
+        verify_proof_req_db_channel: conf.verify_proof_req_database_channel,
+        gw_url: conf.gw_url,
+        error_sleep_initial_secs: conf.error_sleep_initial_secs,
+        error_sleep_max_secs: conf.error_sleep_max_secs,
+        health_check_port: conf.health_check_port,
+        health_check_timeout: conf.health_check_timeout,
+        get_logs_poll_interval: conf.get_logs_poll_interval,
+        get_logs_block_batch_size: conf.get_logs_block_batch_size,
+        log_last_processed_every_number_of_updates: conf.log_last_processed_every_number_of_updates,
+        ciphertext_commits_address: conf.ciphertext_commits_address,
+        gateway_config_address: conf.gateway_config_address,
+        drift_no_consensus_timeout: conf.drift_no_consensus_timeout,
+        drift_post_consensus_grace: conf.drift_post_consensus_grace,
+        drift_auto_revert_grace_period: conf.drift_auto_revert_grace_period,
+        drift_auto_revert_enabled: conf.drift_auto_revert_enabled,
+    };
+
+    let gw_listener = std::sync::Arc::new(GatewayListener::new(
+        conf.input_verification_address,
+        config.clone(),
+        cancel_token.clone(),
+        provider.clone(),
+    ));
+
+    let http_server = HttpServer::new(
+        gw_listener.clone(),
+        conf.health_check_port,
+        cancel_token.clone(),
+    );
+
+    install_signal_handlers(cancel_token.clone())?;
+
+    let http_server_fut = tokio::spawn(async move { http_server.start().await });
+    metrics_server::spawn(conf.metrics_addr.clone(), cancel_token.child_token());
+
+    info!(
+        health_check_port = conf.health_check_port,
+        "Starting HTTP health check server"
+    );
+
+    let (db_pool, _pool_refresh_handle) = connect_pool_with_options(
+        &config.database_url,
+        PgPoolOptions::new().max_connections(config.database_pool_size),
+        Some(&cancel_token),
+    )
+    .await?;
+
+    // gw-listener is the revert runner — it runs the revert SQL if pending.
+    drift_revert::init(
+        db_pool.clone(),
+        cancel_token.clone(),
+        Some(RevertRunnerConfig {
+            grace_period: config.drift_auto_revert_grace_period,
+            max_recent_attempts: conf.drift_auto_revert_max_recent_attempts,
+            recent_attempts_window: conf.drift_auto_revert_recent_attempts_window,
+        }),
+    )
+    .await?;
+
+    let gw_listener_fut = tokio::spawn(async move { gw_listener.run(db_pool).await });
+
+    let gw_listener_res = gw_listener_fut.await;
+    let http_server_res = http_server_fut.await;
+
+    info!(
+        gw_listener_res = ?gw_listener_res,
+        http_server_res = ?http_server_res,
+        "Gateway listener and HTTP health check server tasks have stopped"
+    );
+
+    gw_listener_res??;
+    http_server_res??;
+
+    info!("Gateway listener and HTTP health check server stopped gracefully");
+
+    Ok(())
+}

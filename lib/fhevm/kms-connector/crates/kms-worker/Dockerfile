@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+
+ARG RUST_IMAGE_VERSION
+
+# Stage 1: Build kms-worker
+FROM ghcr.io/zama-ai/fhevm/gci/rust-glibc:${RUST_IMAGE_VERSION} AS builder
+
+# The profile used to run `cargo build`
+ARG CARGO_PROFILE=release
+
+# Use root user for build stage
+USER root
+
+WORKDIR /app
+
+# Copy git directory to include commit hash in build info
+COPY .git ./.git
+
+# Copy sources
+COPY gateway-contracts/rust_bindings ./gateway-contracts/rust_bindings
+COPY host-contracts/rust_bindings ./host-contracts/rust_bindings
+COPY kms-connector ./kms-connector
+
+# Build with improved caching
+WORKDIR /app/kms-connector
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/app/kms-connector/target,sharing=locked \
+    git config --global --add safe.directory /app && \
+    cargo fetch && \
+    cargo build --profile=${CARGO_PROFILE} -p kms-worker && \
+    cp target/${CARGO_PROFILE}/kms-worker /tmp/kms-worker
+
+# Stage 2: Runtime image
+FROM cgr.dev/zama.ai/glibc-dynamic:15.2.0 AS prod
+
+COPY --from=builder /etc/group /etc/group
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder --chown=fhevm:fhevm /tmp/kms-worker /app/kms-connector/bin/kms-worker
+
+USER fhevm:fhevm
+
+ENTRYPOINT ["/app/kms-connector/bin/kms-worker", "start"]
+
+HEALTHCHECK --start-period=5s --interval=1m --timeout=3s --retries=3 \
+    CMD ["/app/kms-connector/bin/kms-worker", "health", "--endpoint", "http://127.0.0.1:9100/healthz"]
+
+FROM prod AS dev

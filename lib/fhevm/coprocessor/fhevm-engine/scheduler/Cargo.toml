@@ -1,0 +1,28 @@
+[package]
+name = "scheduler"
+version = "0.6.1"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+# workspace dependencies
+anyhow = { workspace = true }
+daggy = { workspace = true }
+hex = { workspace = true }
+opentelemetry = { workspace = true }
+rayon = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tfhe = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+prometheus = { workspace = true }
+
+# local dependencies
+fhevm-engine-common = { path = "../fhevm-engine-common" }
+
+[features]
+nightly-avx512 = ["tfhe/nightly-avx512"]
+gpu = ["tfhe/gpu"]
+
+[lints]
+workspace = true

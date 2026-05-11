@@ -1,0 +1,25 @@
+# directories
+.coverage_artifacts
+.coverage_cache
+.coverage_contracts
+abi
+artifacts
+build
+cache
+coverage
+dist
+rust_bindings/target
+node_modules
+types
+
+# sdk/js-sdk exceptions
+!sdk/js-sdk/src/core/types
+
+# files
+*.env
+*.log
+.DS_Store
+.pnp.*
+coverage.json
+package-lock.json
+yarn.lock

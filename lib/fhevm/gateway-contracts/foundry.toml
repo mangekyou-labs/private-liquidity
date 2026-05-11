@@ -1,0 +1,11 @@
+[profile.default]
+src = 'contracts'
+libs = ['node_modules']
+solc = '0.8.24'
+cbor_metadata = false
+bytecode_hash = 'none'
+
+remappings = [
+    '@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/',
+    '@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/',
+]

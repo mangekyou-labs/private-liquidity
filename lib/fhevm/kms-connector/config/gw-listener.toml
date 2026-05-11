@@ -1,0 +1,93 @@
+# Example configuration for KMS Connector's `GatewayListener`
+
+# Service name for tracing (optional, defaults to "kms-connector-gw-listener")
+# ENV: KMS_CONNECTOR_SERVICE_NAME
+# service_name = "kms-connector-gw-listener"
+
+# Chain ID for the Gateway network (required)
+# ENV: KMS_CONNECTOR_GATEWAY_CHAIN_ID
+gateway_chain_id = 54321
+
+# Gateway HTTP RPC URL endpoint (required)
+# ENV: KMS_CONNECTOR_GATEWAY_URL
+gateway_url = "http://localhost:8545"
+
+# Ethereum RPC node endpoint (required)
+# ENV: KMS_CONNECTOR_ETHEREUM_URL
+ethereum_url = "http://localhost:8545"
+
+# Chain ID for the Ethereum network (required)
+# ENV: KMS_CONNECTOR_ETHEREUM_CHAIN_ID
+ethereum_chain_id = 11155111
+
+# Address of the KMS verifier contract (required)
+# Format: hex string with 0x prefix
+# ENV: KMS_CONNECTOR_KMS_VERIFIER_ADDRESS
+kms_verifier_address = "0x0000000000000000000000000000000000000000"
+
+# URL of the KMS Connector internal database (required)
+# Format: see https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS
+# ENV: KMS_CONNECTOR_DATABASE_URL
+database_url = "postgres://postgres:postgres@localhost/kms-connector"
+
+# The endpoint used to monitor the connector components (optional, defaults to "0.0.0.0:9100")
+# ENV: KMS_CONNECTOR_MONITORING_ENDPOINT
+# monitoring_endpoint = "0.0.0.0:9100"
+
+# The timeout to perform each external service connection healthcheck (optional, defaults to 3s)
+# ENV: KMS_CONNECTOR_HEALTHCHECK_TIMEOUT (format: https://docs.rs/humantime/latest/humantime/)
+# healthcheck_timeout = "3s"
+
+# The maximum number of tasks to process events/responses concurrently (optional, defaults to 1000)
+# ENV: KMS_CONNECTOR_TASK_LIMIT
+# task_limit = 1000
+
+# The polling interval for decryption requests (optional, defaults to 500ms)
+# ENV: KMS_CONNECTOR_DECRYPTION_POLLING (format: https://docs.rs/humantime/latest/humantime/)
+# decryption_polling = "500ms"
+
+# The polling interval for key management requests (optional, defaults to 30s)
+# ENV: KMS_CONNECTOR_KMS_GENERATION_POLLING (format: https://docs.rs/humantime/latest/humantime/)
+# key_management_polling = "30s"
+
+# Maximum number of blocks per eth_getLogs RPC call (optional, defaults to 100)
+# ENV: KMS_CONNECTOR_GET_LOGS_BATCH_SIZE
+# get_logs_batch_size = 100
+
+# Maximum consecutive polling errors before the listener stops (optional, defaults to 20)
+# ENV: KMS_CONNECTOR_MAX_CONSECUTIVE_POLLING_ERRORS
+# max_consecutive_polling_errors = 20
+
+# Block number to start processing decryption events from (optional, defaults to latest block if not set)
+# ENV: KMS_CONNECTOR_DECRYPTION_FROM_BLOCK_NUMBER
+# decryption_from_block_number = 1234
+
+# Block number to start processing KMS operation events from (optional, defaults to latest block if not set)
+# ENV: KMS_CONNECTOR_KMS_FROM_BLOCK_NUMBER
+# kms_operation_from_block_number = 1234
+
+# Configuration of the Decryption contract (required)
+[decryption_contract]
+# Address of the Decryption contract (required)
+# Format: hex string with 0x prefix
+# ENV: KMS_CONNECTOR_DECRYPTION_CONTRACT__ADDRESS
+address = "0x0000000000000000000000000000000000000000"
+# EIP-712 domain name for Decryption contract (optional, defaults to "Decryption")
+# ENV: KMS_CONNECTOR_DECRYPTION_CONTRACT__DOMAIN_NAME
+# domain_name = "Decryption"
+# EIP-712 domain version for Decryption contract (optional, defaults to "1")
+# ENV: KMS_CONNECTOR_DECRYPTION_DOMAIN_VERSION
+# domain_version = "1"
+
+# Configuration of the KMSGeneration contract (required)
+[kms_generation_contract]
+# Address of the KMSGeneration contract (required)
+# Format: hex string with 0x prefix
+# ENV: KMS_CONNECTOR_KMS_GENERATION_CONTRACT__ADDRESS
+address = "0x0000000000000000000000000000000000000000"
+# EIP-712 domain name for KMSGeneration contract (optional, defaults to "KMSGeneration")
+# ENV: KMS_CONNECTOR_KMS_GENERATION_CONTRACT__DOMAIN_NAME
+# domain_name = "KMSGeneration"
+# EIP-712 domain version for KMSGeneration contract (optional, defaults to "1")
+# ENV: KMS_CONNECTOR_KMS_GENERATION_CONTRACT__DOMAIN_VERSION
+# domain_version = "1"
